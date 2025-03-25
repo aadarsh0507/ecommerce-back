@@ -1,154 +1,120 @@
-const User = require("../models/user");
-const bcrypt = require("bcryptjs");
-const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 require("dotenv").config();
+const User = require("../models/user");
+const OTPModel = require("../models/OTPModel"); // Create OTP Schema
+const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 
-// **Reusable Email Sending Function**
-const sendEmail = async (to, subject, htmlContent) => {
-    try {
-        const transporter = nodemailer.createTransport({
-            service: "gmail",
-            auth: {
-                user: process.env.EMAIL_USER,
-                pass: process.env.EMAIL_PASS, // Use App Password if 2FA is enabled
-            },
-        });
+// Configure Nodemailer Transporter
+const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+    },
+});
 
-        const mailOptions = {
-            from: `"E-commerce App" <${process.env.EMAIL_USER}>`,
-            to,
-            subject,
-            html: htmlContent,
-        };
+// **Generate and Send OTP**
+const sendOTP = async (email) => {
+    const otp = Math.floor(100000 + Math.random() * 900000); // Generate 6-digit OTP
+    const expiresAt = Date.now() + 10 * 60 * 1000; // OTP expires in 10 mins
 
-        await transporter.sendMail(mailOptions);
-        console.log("✅ Email sent successfully to", to);
-    } catch (error) {
-        console.error("❌ Error sending email:", error);
-        throw new Error("Could not send email. Please try again later.");
-    }
+    // Store OTP in database (hashed for security)
+    const hashedOTP = await bcrypt.hash(otp.toString(), 10);
+    await OTPModel.findOneAndUpdate(
+        { email },
+        { otp: hashedOTP, expiresAt },
+        { upsert: true, new: true }
+    );
+
+    // Send OTP via email
+    await transporter.sendMail({
+        from: process.env.EMAIL_USER,
+        to: email,
+        subject: "Your OTP Code",
+        html: `<p>Your OTP for verification is: <strong>${otp}</strong>. It expires in 10 minutes.</p>`,
+    });
+
+    return true;
 };
 
-// **Send Activation Email**
-const sendActivationEmail = async (user) => {
-    const activationUrl = `${process.env.FRONTEND_URL}/activate/${user.verificationToken}`;
-    const emailContent = `
-        <p>Hello ${user.name},</p>
-        <p>Click the link below to activate your account:</p>
-        <p><a href="${activationUrl}" target="_blank">Activate Account</a></p>
-        <p>If you did not request this, please ignore this email.</p>
-    `;
-
-    await sendEmail(user.email, "Activate Your Account", emailContent);
-};
-
-// **Signup Route**
+// **Signup User & Send OTP**
 exports.signup = async (req, res) => {
     try {
         const { name, phone, email, password } = req.body;
-
         if (!name || !phone || !email || !password) {
             return res.status(400).json({ success: false, message: "All fields are required." });
         }
 
         const existingUser = await User.findOne({ email: email.toLowerCase() });
         if (existingUser) {
-            return res.status(400).json({ success: false, message: "Email already registered. Please log in." });
+            return res.status(400).json({ success: false, message: "Email already registered." });
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
-        const verificationToken = crypto.randomBytes(32).toString("hex");
-
-        const newUser = new User({
-            name,
-            phone,
-            email: email.toLowerCase(),
-            password: hashedPassword,
-            isVerified: false,
-            verificationToken,
-        });
-
+        const newUser = new User({ name, phone, email: email.toLowerCase(), password: hashedPassword, isVerified: false });
         await newUser.save();
-        console.log("✅ User saved:", newUser.email);
 
-        // Send activation email
-        await sendActivationEmail(newUser);
+        // Send OTP
+        await sendOTP(newUser.email);
 
-        res.status(201).json({
-            success: true,
-            message: "User registered successfully. Check your email to activate your account.",
-        });
+        res.status(201).json({ success: true, message: "Registration successful. Check your email for OTP." });
     } catch (error) {
         console.error("❌ Signup Error:", error);
-        res.status(500).json({ success: false, message: "Server error, please try again." });
-    }
-};
-
-// **Activate Account**
-exports.activateAccount = async (req, res) => {
-    try {
-        const { token } = req.params;
-        console.log("🔍 Activation request for token:", token);
-
-        const user = await User.findOne({ verificationToken: token });
-
-        if (!user) {
-            console.log("❌ Invalid activation token");
-            return res.status(400).json({ success: false, message: "Invalid or expired activation token." });
-        }
-
-        user.isVerified = true;
-        user.verificationToken = null; // Remove token after activation
-        await user.save();
-
-        console.log("✅ Account activated:", user.email);
-
-        return res.redirect(`${process.env.FRONTEND_URL}/login?activated=true`);
-    } catch (error) {
-        console.error("❌ Activation Error:", error);
         res.status(500).json({ success: false, message: "Server error." });
     }
 };
 
-// **Check Verification Status**
-exports.checkVerificationStatus = async (req, res) => {
+// **Verify OTP & Activate Account**
+exports.verifyOTP = async (req, res) => {
     try {
-        const { email } = req.query;
-        if (!email) return res.status(400).json({ message: "Email is required." });
+        const { email, otp } = req.body;
+        if (!email || !otp) {
+            return res.status(400).json({ success: false, message: "Email and OTP are required." });
+        }
 
-        const user = await User.findOne({ email: email.toLowerCase() });
-        if (!user) return res.status(400).json({ message: "User not found." });
+        const otpRecord = await OTPModel.findOne({ email });
+        if (!otpRecord) {
+            return res.status(400).json({ success: false, message: "OTP expired or invalid." });
+        }
 
-        res.status(200).json({ isVerified: user.isVerified });
+        const isMatch = await bcrypt.compare(otp.toString(), otpRecord.otp);
+        if (!isMatch) {
+            return res.status(400).json({ success: false, message: "Incorrect OTP." });
+        }
+
+        // OTP is correct, verify user
+        await User.findOneAndUpdate({ email }, { isVerified: true });
+        await OTPModel.deleteOne({ email });
+
+        res.status(200).json({ success: true, message: "Account verified successfully!" });
     } catch (error) {
-        console.error("❌ Verification Status Check Error:", error);
-        res.status(500).json({ message: "Server error, please try again." });
+        console.error("❌ OTP Verification Error:", error);
+        res.status(500).json({ success: false, message: "Server error." });
     }
 };
 
-// **Resend Activation Email**
-exports.resendVerificationEmail = async (req, res) => {
+// **Resend OTP**
+exports.resendOTP = async (req, res) => {
     try {
         const { email } = req.body;
-        if (!email) return res.status(400).json({ message: "Email is required." });
+        if (!email) {
+            return res.status(400).json({ success: false, message: "Email is required." });
+        }
 
         const user = await User.findOne({ email: email.toLowerCase() });
-        if (!user) return res.status(400).json({ message: "User not found." });
-        if (user.isVerified) return res.status(400).json({ message: "Email already verified." });
+        if (!user) return res.status(404).json({ success: false, message: "User not found." });
+        if (user.isVerified) return res.status(400).json({ success: false, message: "User already verified." });
 
-        user.verificationToken = crypto.randomBytes(32).toString("hex");
-        await user.save();
-
-        await sendActivationEmail(user);
-        res.status(200).json({ success: true, message: "Activation email sent again. Check your inbox." });
+        await sendOTP(user.email);
+        res.status(200).json({ success: true, message: "New OTP sent successfully!" });
     } catch (error) {
-        console.error("❌ Resend Activation Email Error:", error);
-        res.status(500).json({ message: "Server error, please try again." });
+        console.error("❌ Resend OTP Error:", error);
+        res.status(500).json({ success: false, message: "Server error." });
     }
 };
 
-// **User Login**
+// **User Login (Only Verified Users)**
 exports.loginUser = async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -159,7 +125,7 @@ exports.loginUser = async (req, res) => {
         const user = await User.findOne({ email: email.toLowerCase() });
         if (!user) return res.status(400).json({ message: "User not found." });
         if (!user.isVerified) {
-            return res.status(401).json({ message: "Please activate your account before logging in." });
+            return res.status(401).json({ message: "Please verify your email before logging in." });
         }
 
         const isMatch = await bcrypt.compare(password, user.password);

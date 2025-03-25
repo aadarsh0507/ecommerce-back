@@ -16,7 +16,7 @@ connectDB();
 // ✅ CORS Configuration (Now Fully Fixed)
 const allowedOrigins = [
     process.env.FRONTEND_URL || "http://localhost:3000",  // Default frontend
-    "http://192.168.101.45:55513" // Add frontend URL dynamically
+    "http://192.168.101.45:50510" // Add frontend URL dynamically
 ];
 
 const corsOptions = {

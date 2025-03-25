@@ -1,12 +1,16 @@
 const express = require("express");
 const router = express.Router();
-const authController = require("../controller/authController");
+const { 
+    signup, 
+    verifyOTP, 
+    resendOTP, 
+    loginUser 
+} = require("../controller/authController"); 
 
-// Authentication Routes
-router.post("/signup", authController.signup);
-router.post("/login", authController.loginUser);
-router.get("/activate/:token", authController.activateAccount); // ✅ Activation route added
-router.get("/check-verification", authController.checkVerificationStatus);
-router.post("/resend-verification", authController.resendVerificationEmail);
+// Define authentication routes
+router.post("/signup", signup); // Register & send OTP
+router.post("/verify-otp", verifyOTP); // Verify OTP
+router.post("/resend-otp", resendOTP); // Resend OTP
+router.post("/login", loginUser); // Login after verification
 
 module.exports = router;
